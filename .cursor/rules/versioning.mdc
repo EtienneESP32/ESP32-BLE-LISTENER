@@ -1,0 +1,29 @@
+---
+description: Incrémenter la version du firmware à chaque livraison ou lot de changements
+globs: esphome/*.yaml
+alwaysApply: false
+---
+
+# Versioning du firmware BLE Intrusion
+
+## Règle
+
+À chaque **livraison** ou **lot de changements** (nouvelles fonctionnalités, corrections importantes, refactos UI), mettre à jour le **numéro de version** du firmware.
+
+## Où modifier
+
+- Fichier : `esphome/ble-sniffer.yaml`
+- Bloc : `substitutions:` → `ble_version: "X.Y.Z"`
+
+## Sémantique
+
+- **X (majeur)** : changement incompatible ou refonte majeure
+- **Y (mineur)** : nouvelle fonctionnalité, amélioration UI, nouveau composant
+- **Z (patch)** : correctifs, réglages logs, textes, sans nouveau comportement
+
+Exemples : `1.0.0` → `1.1.0` (nouvelle UI inconnus), `1.1.0` → `1.1.1` (fix logs uniquement).
+
+## Vérifications
+
+- La version est affichée dans l’UI (text sensor « Version ») et dans le `friendly_name` de l’appareil.
+- Ne pas oublier de mettre à jour `ble_version` quand on touche au comportement ou à l’interface.

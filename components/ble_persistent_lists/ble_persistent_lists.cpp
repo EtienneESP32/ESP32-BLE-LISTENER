@@ -72,7 +72,7 @@ void BlePersistentListsComponent::list_remove(std::string &list_csv, const std::
 void BlePersistentListsComponent::load_all() {
   nvs_handle_t h;
   if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
-    ESP_LOGW(TAG, "NVS open read failed");
+    ESP_LOGD(TAG, "NVS open read failed");
     return;
   }
   size_t len = 0;
@@ -98,7 +98,7 @@ void BlePersistentListsComponent::load_all() {
 void BlePersistentListsComponent::save_whitelist() {
   nvs_handle_t h;
   if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
-    ESP_LOGW(TAG, "NVS open write failed");
+    ESP_LOGD(TAG, "NVS open write failed");
     return;
   }
   esp_err_t err = nvs_set_str(h, KEY_WL, whitelist_.c_str());
@@ -109,7 +109,7 @@ void BlePersistentListsComponent::save_whitelist() {
 void BlePersistentListsComponent::save_blacklist() {
   nvs_handle_t h;
   if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
-    ESP_LOGW(TAG, "NVS open write failed");
+    ESP_LOGD(TAG, "NVS open write failed");
     return;
   }
   esp_err_t err = nvs_set_str(h, KEY_BL, blacklist_.c_str());
