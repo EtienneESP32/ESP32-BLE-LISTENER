@@ -1,0 +1,8 @@
+---
+name: BLE Persistent Lists
+description: Persist BLE whitelist and blacklist in NVS (ESP32)
+source:
+  - ble_persistent_lists.cpp
+  - ble_persistent_lists.h
+dependencies:
+  - esp32

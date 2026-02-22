@@ -1,0 +1,21 @@
+# ESPHome
+.esphome/
+*.yaml.bak
+
+# Secrets (ne jamais committer)
+esphome/secrets.yaml
+**/secrets.yaml
+
+# Build / IDE
+.pio/
+.vscode/
+__pycache__/
+*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / captures
+*.log
+serial_capture_*.txt
