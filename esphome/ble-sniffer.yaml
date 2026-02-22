@@ -3,6 +3,7 @@
 # Secrets : copier esphome/secrets.yaml.example en secrets.yaml (dans esphome/)
 
 substitutions:
+  ble_version: "1.0.0"
   eedomus_host: !secret eedomus_host
   eedomus_api_user: !secret eedomus_api_user
   eedomus_api_secret: !secret eedomus_api_secret
@@ -16,7 +17,7 @@ external_components:
 
 esphome:
   name: ble-intrusion-sniff
-  friendly_name: BLE Intrusion Sniffer
+  friendly_name: "BLE Intrusion Sniffer ${ble_version}"
   on_boot:
     - lambda: |-
         id(last_unknown_mac).assign("");
@@ -79,6 +80,7 @@ switch:
     name: "LED bleue"
     id: sw_led_blue
     output: out_led_blue
+    internal: true
   - platform: template
     name: "Armement alerte BLE"
     id: arm_alert
@@ -184,20 +186,27 @@ script:
           id: text_vendor_web
           state: "Recherche..."
       - http_request.get:
-          url: !lambda 'return ("https://api.macvendors.com/" + p_mac).c_str();'
+          url: !lambda |-
+            static char url_buf[96];
+            std::string oui = p_mac.size() >= 8 ? p_mac.substr(0, 8) : p_mac;
+            snprintf(url_buf, sizeof(url_buf), "https://api.macvendors.com/%s", oui.c_str());
+            return url_buf;
           capture_response: true
           on_response:
             then:
               - lambda: |-
                   std::string vendor = body;
-                  if (vendor.length() > 50) vendor = vendor.substr(0, 50);
-                  for (size_t i = 0; i < vendor.size(); i++)
-                    if (vendor[i] == '\n' || vendor[i] == '\r') vendor[i] = ' ';
-                  if (vendor.length() > 0 && vendor.length() < 200) {
-                    id(text_vendor_web).publish_state(vendor.c_str());
-                  } else {
-                    id(text_vendor_web).publish_state("Non trouvé");
+                  bool is_error = (vendor.find("error") != std::string::npos) ||
+                    (vendor.find("Not Found") != std::string::npos) ||
+                    (vendor.find("\"detail\"") != std::string::npos) ||
+                    vendor.length() > 200;
+                  if (is_error || vendor.empty()) vendor = "Non trouvé";
+                  else {
+                    if (vendor.length() > 50) vendor = vendor.substr(0, 50);
+                    for (size_t i = 0; i < vendor.size(); i++)
+                      if (vendor[i] == '\n' || vendor[i] == '\r') vendor[i] = ' ';
                   }
+                  id(text_vendor_web).publish_state(vendor.c_str());
                   std::string e = std::string(id(last_10_entries));
                   std::string new_e;
                   size_t pos = 0;
@@ -293,7 +302,7 @@ text_sensor:
     update_interval: 10s
     lambda: |-
       std::string e = std::string(id(last_10_entries));
-      if (e.empty()) return "(vide)";
+      if (e.empty()) return std::string("(vide)");
       std::string disp;
       int idx = 1;
       size_t pos = 0;
@@ -322,15 +331,14 @@ text_sensor:
       std::string w = id(ble_lists).get_whitelist_str();
       std::string names = std::string(id(whitelist_names));
       std::string out;
-      int idx = 1;
       size_t pos = 0;
       while (pos < w.size()) {
         size_t next = w.find(',', pos);
         if (next == std::string::npos) next = w.size();
         std::string mac = w.substr(pos, next - pos);
         if (!mac.empty()) {
-          if (idx > 1) out += "\n";
-          out += std::to_string(idx) + ". " + mac + " - ";
+          if (!out.empty()) out += "\n";
+          out += mac + " → ";
           std::string name;
           size_t npos = 0;
           while (npos < names.size()) {
@@ -345,29 +353,29 @@ text_sensor:
             npos = nline + 1;
           }
           out += name.empty() ? "(sans nom)" : name;
-          idx++;
         }
         pos = next + 1;
       }
-      return out.empty() ? "(vide)" : out;
+      return out.empty() ? std::string("(vide)") : out;
   - platform: template
-    name: "Whitelist (MAC)"
-    id: text_whitelist
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      if (w.empty()) w = "(vide)";
-      return w;
-  - platform: template
-    name: "Liste rouge (MAC)"
+    name: "Liste rouge"
     id: text_blacklist
     update_interval: 30s
     lambda: |-
       std::string b = id(ble_lists).get_blacklist_str();
-      if (b.empty()) b = "(vide)";
-      return b;
+      if (b.empty()) return std::string("(vide)");
+      std::string out;
+      size_t pos = 0;
+      while (pos < b.size()) {
+        size_t next = b.find(',', pos);
+        if (next == std::string::npos) next = b.size();
+        if (!out.empty()) out += "\n";
+        out += b.substr(pos, next - pos);
+        pos = next + 1;
+      }
+      return out;
   - platform: template
-    name: "Slot 1 MAC"
+    name: "01"
     id: text_wl_mac_1
     update_interval: 30s
     lambda: |-
@@ -377,7 +385,7 @@ text_sensor:
       if (next == std::string::npos) next = w.size();
       return w.substr(0, next);
   - platform: template
-    name: "Slot 2 MAC"
+    name: "02"
     id: text_wl_mac_2
     update_interval: 30s
     lambda: |-
@@ -392,7 +400,7 @@ text_sensor:
       }
       return std::string("-");
   - platform: template
-    name: "Slot 3 MAC"
+    name: "03"
     id: text_wl_mac_3
     update_interval: 30s
     lambda: |-
@@ -407,7 +415,7 @@ text_sensor:
       }
       return std::string("-");
   - platform: template
-    name: "Slot 4 MAC"
+    name: "04"
     id: text_wl_mac_4
     update_interval: 30s
     lambda: |-
@@ -422,7 +430,7 @@ text_sensor:
       }
       return std::string("-");
   - platform: template
-    name: "Slot 5 MAC"
+    name: "05"
     id: text_wl_mac_5
     update_interval: 30s
     lambda: |-
@@ -437,7 +445,7 @@ text_sensor:
       }
       return std::string("-");
   - platform: template
-    name: "Slot 6 MAC"
+    name: "06"
     id: text_wl_mac_6
     update_interval: 30s
     lambda: |-
@@ -452,7 +460,7 @@ text_sensor:
       }
       return std::string("-");
   - platform: template
-    name: "Slot 7 MAC"
+    name: "07"
     id: text_wl_mac_7
     update_interval: 30s
     lambda: |-
@@ -467,7 +475,7 @@ text_sensor:
       }
       return std::string("-");
   - platform: template
-    name: "Slot 8 MAC"
+    name: "08"
     id: text_wl_mac_8
     update_interval: 30s
     lambda: |-
@@ -482,7 +490,7 @@ text_sensor:
       }
       return std::string("-");
   - platform: template
-    name: "Slot 9 MAC"
+    name: "09"
     id: text_wl_mac_9
     update_interval: 30s
     lambda: |-
@@ -497,7 +505,7 @@ text_sensor:
       }
       return std::string("-");
   - platform: template
-    name: "Slot 10 MAC"
+    name: "10"
     id: text_wl_mac_10
     update_interval: 30s
     lambda: |-
@@ -522,7 +530,6 @@ button:
           std::string mac = std::string(id(last_unknown_mac));
           if (!mac.empty()) {
             id(ble_lists).add_to_whitelist(mac);
-            id(text_whitelist).publish_state(id(ble_lists).get_whitelist_str().c_str());
             id(refresh_whitelist_table).execute();
           }
   - platform: template
@@ -533,7 +540,6 @@ button:
           std::string mac = std::string(id(last_unknown_mac));
           if (!mac.empty()) {
             id(ble_lists).remove_from_whitelist(mac);
-            id(text_whitelist).publish_state(id(ble_lists).get_whitelist_str().c_str());
             id(refresh_whitelist_table).execute();
           }
   - platform: template
@@ -546,7 +552,7 @@ button:
 
 text:
   - platform: template
-    name: "Nom slot 1"
+    name: "01."
     id: text_wl_nom_1
     mode: text
     min_length: 0
@@ -599,7 +605,7 @@ text:
           id(whitelist_names).assign(new_names);
       - script.execute: refresh_whitelist_table
   - platform: template
-    name: "Nom slot 2"
+    name: "02."
     id: text_wl_nom_2
     mode: text
     min_length: 0
@@ -664,7 +670,7 @@ text:
           }
       - script.execute: refresh_whitelist_table
   - platform: template
-    name: "Nom slot 3"
+    name: "03."
     id: text_wl_nom_3
     mode: text
     min_length: 0
@@ -729,7 +735,7 @@ text:
           }
       - script.execute: refresh_whitelist_table
   - platform: template
-    name: "Nom slot 4"
+    name: "04."
     id: text_wl_nom_4
     mode: text
     min_length: 0
@@ -794,7 +800,7 @@ text:
           }
       - script.execute: refresh_whitelist_table
   - platform: template
-    name: "Nom slot 5"
+    name: "05."
     id: text_wl_nom_5
     mode: text
     min_length: 0
@@ -859,7 +865,7 @@ text:
           }
       - script.execute: refresh_whitelist_table
   - platform: template
-    name: "Nom slot 6"
+    name: "06."
     id: text_wl_nom_6
     mode: text
     min_length: 0
@@ -924,7 +930,7 @@ text:
           }
       - script.execute: refresh_whitelist_table
   - platform: template
-    name: "Nom slot 7"
+    name: "07."
     id: text_wl_nom_7
     mode: text
     min_length: 0
@@ -989,7 +995,7 @@ text:
           }
       - script.execute: refresh_whitelist_table
   - platform: template
-    name: "Nom slot 8"
+    name: "08."
     id: text_wl_nom_8
     mode: text
     min_length: 0
@@ -1054,7 +1060,7 @@ text:
           }
       - script.execute: refresh_whitelist_table
   - platform: template
-    name: "Nom slot 9"
+    name: "09."
     id: text_wl_nom_9
     mode: text
     min_length: 0
@@ -1119,7 +1125,7 @@ text:
           }
       - script.execute: refresh_whitelist_table
   - platform: template
-    name: "Nom slot 10"
+    name: "10."
     id: text_wl_nom_10
     mode: text
     min_length: 0
