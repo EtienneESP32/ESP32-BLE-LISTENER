@@ -1,3 +1,4 @@
+#include "secrets.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <AsyncTCP.h>
@@ -9,17 +10,11 @@
 #include <WiFi.h>
 #include <time.h>
 
+
 // ------------------------------------------------------------------
 // CONFIGURATION (To be changed by user)
 // ------------------------------------------------------------------
-const char *WIFI_SSID = "XXX";
-const char *WIFI_PASSWORD = "XXX";
-
-// Eedomus Configuration
-const char *EEDOMUS_IP = "XXX"; // Replace with your Eedomus IP
-const char *EEDOMUS_API_USER = "XXX";
-const char *EEDOMUS_API_SECRET = "XXX";
-const char *EEDOMUS_PERIPH_ID = "0"; // Replace with your Eedomus Peripheral ID
+// (Configurations are now in secrets.h)
 
 const char *FIRMWARE_VERSION = "v1.3.5";
 

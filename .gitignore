@@ -5,6 +5,7 @@
 # Secrets (ne jamais committer)
 esphome/secrets.yaml
 **/secrets.yaml
+**/secrets.h
 
 # Build / IDE
 .pio/
