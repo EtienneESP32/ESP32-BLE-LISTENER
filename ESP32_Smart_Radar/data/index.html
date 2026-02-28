@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Bluetooth Radar</title>
+    <link rel="stylesheet" href="style_v11.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+
+<body>
+    <div class="app-container">
+        <header>
+            <div class="logo">
+                <div class="pulse-ring"></div>
+                <h1>Radar BLE</h1>
+            </div>
+            <p class="subtitle">Sécurité & Détection d'Intrusion</p>
+            <div style="display:flex;justify-content:center;margin-top:1rem;">
+                <button id="btn-surveillance" class="btn-surveillance disarmed" onclick="toggleSurveillance()">
+                    🔓 Armer la surveillance
+                </button>
+            </div>
+        </header>
+        <main>
+            <section class="card scanners">
+                <div class="section-header">
+                    <h2>📡 Appareils Détectés</h2>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <span class="badge" id="device-count">0</span>
+                        <button class="btn-bulk btn-bulk-add" onclick="addAllToWhitelist()" title="Tout autoriser">✅
+                            Tout autoriser</button>
+                    </div>
+                </div>
+                <div class="device-list" id="detected-list">
+                    <div class="empty-state">Scan en cours...</div>
+                </div>
+            </section>
+            <section class="card whitelist">
+                <div class="section-header">
+                    <h2>✅ Liste Blanche</h2>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <span class="badge" id="whitelist-count">0</span>
+                        <button class="btn-bulk btn-bulk-clear" onclick="clearWhitelist()"
+                            title="Vider la liste blanche">🗑️ Tout vider</button>
+                    </div>
+                </div>
+                <div class="device-list" id="whitelist-list">
+                    <div class="empty-state">Aucun appareil autorisé.</div>
+                </div>
+            </section>
+        </main>
+        <footer>
+            <div id="firmware-version" style="text-align:center;opacity:0.5;font-size:0.8rem;margin-top:1rem;">vUnknown
+            </div>
+        </footer>
+    </div>
+    <div class="fab" onclick="document.getElementById('add-modal').classList.add('active')"><i
+            class="fa-solid fa-plus"></i></div>
+    <div class="modal-overlay" id="add-modal">
+        <div class="modal-content">
+            <h3>Ajouter Manuellement</h3>
+            <input type="text" id="manual-mac" placeholder="XX:XX:XX:XX:XX:XX" class="input-mac">
+            <div class="modal-actions">
+                <button class="btn btn-secondary"
+                    onclick="document.getElementById('add-modal').classList.remove('active')">Annuler</button>
+                <button class="btn btn-primary" onclick="addManualMac()">Ajouter</button>
+            </div>
+        </div>
+    </div>
+    <script src="script_v11.js"></script>
+</body>
+
+</html>

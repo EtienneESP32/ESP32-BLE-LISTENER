@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>BLE Intrusion – Simulation UI</title>
+<style>
+  :root { --bg: #1c1c1e; --card: #2c2c2e; --text: #e5e5ea; --muted: #8e8e93; --accent: #0a84ff; --green: #30d158; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 16px; font-size: 14px; }
+  h1 { font-size: 1.1rem; margin: 0 0 8px; color: var(--muted); }
+  h2 { font-size: 0.95rem; margin: 16px 0 8px; color: var(--muted); }
+  .card { background: var(--card); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; flex-wrap: wrap; }
+  .label { min-width: 180px; color: var(--muted); }
+  .value { font-family: ui-monospace, monospace; font-size: 12px; }
+  input[type="text"] { background: var(--bg); border: 1px solid #3a3a3c; border-radius: 6px; color: var(--text); padding: 6px 10px; flex: 1; max-width: 280px; }
+  button { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 13px; }
+  button.wl { background: var(--green); padding: 4px 10px; font-size: 12px; }
+  button.secondary { background: #3a3a3c; }
+  .list-header, .list-body { display: grid; grid-template-columns: 36px 1fr 200px; gap: 6px 12px; align-items: center; }
+  .list-body { margin-top: 6px; }
+  .list-body .label { min-width: 0; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 16px; }
+  hr { border: none; border-top: 1px solid #3a3a3c; margin: 16px 0; }
+</style>
+<body>
+  <h1>BLE Intrusion – Simulation UI (sans appareil)</h1>
+  <p class="note">Prévisualisation de la disposition. Les actions ne modifient que cette page.</p>
+
+  <div class="card">
+    <h2>Infos générales</h2>
+    <div class="row"><span class="label">Version</span><span class="value" id="version">2026.1.4</span></div>
+    <div class="row"><span class="label">Dernière MAC vue</span><span class="value" id="last_seen">1C:64:AD:89:E0:22</span></div>
+    <div class="row"><span class="label">Dernière MAC inconnue</span><span class="value" id="last_unknown">25:03:26:A4:57:B8</span></div>
+    <div class="row"><span class="label">Info constructeur (web)</span><span class="value" id="vendor_web">Espressif Inc.</span></div>
+    <div class="row"><span class="label">Liste rouge (stockage alertes)</span><span class="value" id="blacklist">(vide)</span></div>
+  </div>
+
+  <div class="card">
+    <h2>BLE identifiés (inconnus) – avec bouton « → WL »</h2>
+    <div id="inconnus"></div>
+  </div>
+
+  <div class="card">
+    <h2>Liste blanche (N° | Nom perso | MAC)</h2>
+    <div class="grid list-header">
+      <span class="label">N°</span>
+      <span class="label">Nom</span>
+      <span class="label">MAC</span>
+    </div>
+    <div class="grid list-body" id="whitelist"></div>
+  </div>
+
+  <div class="card">
+    <h2>Actions</h2>
+    <div class="row">
+      <input type="text" id="wl_label" placeholder="Identification (liste blanche)" maxlength="80">
+      <button id="btn_add">Ajouter à la liste blanche</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="secondary" id="btn_remove">Retirer dernière inconnue de la WL</button>
+      <button class="secondary" id="btn_lookup">Rechercher infos constructeur (web)</button>
+    </div>
+  </div>
+
+  <p class="note">Pour tester sur le vrai appareil : <code>py -3 -m esphome run esphome/ble-sniffer.yaml --device 192.168.1.225</code> ou <code>.\upload-wifi.ps1</code></p>
+
+  <script>
+    const inconnusData = [
+      "25:03:26:A4:57:B8 | Espressif Inc.",
+      "AA:BB:CC:DD:EE:01 | Apple, Inc.",
+      "AA:BB:CC:DD:EE:02 | Samsung Electronics",
+      "AA:BB:CC:DD:EE:03 | Non trouvé"
+    ];
+    let whitelistData = [
+      { num: 1, nom: "Mon téléphone", mac: "1C:64:AD:89:E0:22" },
+      { num: 2, nom: "Montre", mac: "FF:EE:DD:CC:BB:AA" }
+    ];
+
+    function renderInconnus() {
+      const root = document.getElementById("inconnus");
+      root.innerHTML = "";
+      inconnusData.forEach((line, i) => {
+        const row = document.createElement("div");
+        row.className = "row";
+        row.style.marginBottom = "4px";
+        const lab = document.createElement("span");
+        lab.className = "label";
+        lab.textContent = `Inconnu ${i + 1}`;
+        const val = document.createElement("span");
+        val.className = "value";
+        val.textContent = line;
+        const btn = document.createElement("button");
+        btn.className = "wl";
+        btn.textContent = "→ WL " + (i + 1);
+        btn.onclick = () => {
+          const mac = line.split(" | ")[0];
+          if (mac) {
+            whitelistData.unshift({ num: whitelistData.length + 1, nom: "", mac });
+            inconnusData.splice(i, 1);
+            whitelistData.forEach((e, j) => e.num = j + 1);
+            renderInconnus();
+            renderWhitelist();
+          }
+        };
+        row.append(lab, val, btn);
+        root.append(row);
+      });
+      if (inconnusData.length === 0) {
+        root.innerHTML = '<span class="value" style="color:var(--muted)">(aucun inconnu)</span>';
+      }
+    }
+
+    function renderWhitelist() {
+      const root = document.getElementById("whitelist");
+      root.innerHTML = "";
+      for (let i = 0; i < 20; i++) {
+        const e = whitelistData[i] || { num: i + 1, nom: "", mac: "-" };
+        const n = document.createElement("span");
+        n.className = "value";
+        n.textContent = e.mac === "-" ? (i + 1) + ". -" : String(e.num);
+        const nom = document.createElement("input");
+        nom.type = "text";
+        nom.placeholder = "Nom";
+        nom.value = e.nom || "";
+        nom.maxLength = 60;
+        nom.onchange = () => { if (whitelistData[i]) whitelistData[i].nom = nom.value; };
+        const mac = document.createElement("span");
+        mac.className = "value";
+        mac.textContent = e.mac;
+        root.append(n, nom, mac);
+      }
+    }
+
+    document.getElementById("btn_add").onclick = () => {
+      const label = document.getElementById("wl_label").value.trim();
+      const mac = document.getElementById("last_unknown").textContent;
+      if (mac && mac !== "-") {
+        whitelistData.unshift({ num: whitelistData.length + 1, nom: label, mac });
+        whitelistData.forEach((e, j) => e.num = j + 1);
+        renderWhitelist();
+      }
+    };
+    document.getElementById("btn_remove").onclick = () => {
+      if (whitelistData.length) whitelistData.shift();
+      whitelistData.forEach((e, j) => e.num = j + 1);
+      renderWhitelist();
+    };
+    document.getElementById("btn_lookup").onclick = () => {
+      document.getElementById("vendor_web").textContent = "Espressif Inc. (simulation)";
+    };
+
+    renderInconnus();
+    renderWhitelist();
+  </script>
+</body>
+</html>

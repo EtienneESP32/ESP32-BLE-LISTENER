@@ -1,51 +1,59 @@
-# Configuration Eedomus – Alerte BLE Intrusion
+# Configuration Eedomus – Alerte intrusion BLE
 
-L’ESP envoie une **alerte vers Eedomus** (API `periph.value`) lorsqu’un **nouvel appareil BLE inconnu** est détecté **et** que le **système est armé**. L’armement se fait via un interrupteur dans l’UI (ou par push HTTP depuis Eedomus).
+Pour recevoir une **alerte** dans eedomus lorsqu’un device BLE **Rouge** (intrusion) est détecté par l’ESP, **armer/désarmer** la surveillance depuis eedomus, et **afficher les infos** du BLE qui a déclenché l’alerte.
 
-## Comportement
+Voir aussi : **`docs/ui_et_eedomus_plan.md`** (plan détaillé UI + eedomus + identification BLE).
 
-- **Sniff BLE** : scan continu ; toute MAC vue est comparée à la **whitelist**.
-- **Whitelist** : liste de MAC autorisées (persistée en NVS, survivant au redémarrage). Les appareils dans la whitelist ne déclenchent pas d’alerte.
-- **Liste rouge (blacklist)** : liste persistée séparément (pour usage futur : MAC à toujours considérer comme intrus).
-- **Armement** : switch « Armement alerte BLE ». Quand **ON** → si une MAC **non whitelistée** est vue, l’ESP envoie une requête HTTP à Eedomus pour mettre à jour le périphérique d’alerte (value = 100). Quand **OFF** → aucune alerte envoyée.
-- **Throttle** : même MAC inconnue ne déclenche pas une nouvelle alerte avant 5 minutes (évite le spam).
+---
 
-## Périphérique Eedomus pour l’alerte
+## 1. Périphériques à créer dans Eedomus
 
-1. Dans Eedomus, créer un **périphérique** (ex. « Alerte BLE Intrusion »).
-2. Type : **Liste** ou **Valeur** selon ton usage (ex. 0 = pas d’alerte, 100 = alerte).
-3. Noter l’**ID numérique** du périphérique et le mettre dans `esphome/secrets.yaml` sous la clé **`eedomus_periph_alert`** (en chaîne, ex. `"123"`).
+| Périphérique | Type | Rôle |
+|--------------|------|------|
+| **Alerte intrusion BLE** | Liste (ON/OFF) ou Binaire | Déclencher les scénarios (notification, alarme). L’ESP envoie value=100 quand une MAC Rouge est vue (système armé). |
+| **Armement alerte BLE** | — | Pas un périphérique eedomus : c’est un **switch sur l’ESP**. Eedomus appelle l’ESP en HTTP pour ON/OFF (voir §2). |
+| **Dernière alerte BLE – MAC** | Texte / note | Afficher la MAC qui a déclenché la dernière alerte. L’ESP met à jour ce périphérique à chaque alerte. |
+| **Dernière alerte BLE – Fabricant** | Texte / note | Afficher le fabricant OUI (ou « Non trouvé »). L’ESP met à jour ce périphérique à chaque alerte. |
 
-## Secrets requis
+Noter les **IDs** des périphériques et les mettre dans `esphome/secrets.yaml` (ex. `eedomus_periph_alerte`, `eedomus_periph_alerte_mac`, `eedomus_periph_alerte_vendor`). Ne jamais committer les IDs.
 
-| Clé | Usage |
-|-----|--------|
-| `eedomus_host` | IP ou hostname de la box eedomus |
-| `eedomus_api_user` | Utilisateur API eedomus |
-| `eedomus_api_secret` | Secret API eedomus |
-| `eedomus_periph_alert` | ID du périphérique eedomus qui reçoit la valeur d’alerte (ex. `"123"`) |
+---
 
-Voir `docs/secrets_reference.md` pour la liste complète.
+## 2. Armer / Désarmer la surveillance BLE
 
-## Piloter l’armement depuis Eedomus (HTTP)
+L’état **armé / désarmé** est porté par l’ESP (switch « Armement alerte BLE »). Eedomus **pilote** l’ESP via HTTP :
 
-Eedomus peut armer/désarmer l’envoi d’alertes en appelant le **serveur web** de l’ESP (port 80) :
+| Action | URL (méthode POST) |
+|--------|--------------------|
+| Armer | `http://<IP_ESP>/api/surveillance/toggle` (Active l'arment) |
+| Désarmer | `http://<IP_ESP>/api/surveillance/toggle` (Bascule l'état) |
 
-| Action | URL (méthode GET ou POST) |
-|--------|---------------------------|
-| Armer l’alerte | `http://<IP_ESP>/switch/armement_alerte_ble/turn_on` |
-| Désarmer l’alerte | `http://<IP_ESP>/switch/armement_alerte_ble/turn_off` |
 
-Remplacer `<IP_ESP>` par l’IP de l’ESP (DHCP ou IP fixe). Le slug peut varier selon le `name` du switch ; en cas de doute, consulter `http://<IP_ESP>/json` pour les champs `id` des entités.
+Remplacer `<IP_ESP>` par l’IP du module BLE (ex. 192.168.1.225).  
+Dans eedomus : créer un **actionneur HTTP** (ou scénario) avec deux états/actions pointant vers ces URLs. Le slug peut varier selon le `name` du switch ; en cas de doute, consulter `http://<IP_ESP>/json` pour les champs `id` des entités.
 
-L’état **armé / désarmé** est **restauré après redémarrage** (`restore_value: true` sur le switch).
+L’état armé est **restauré après redémarrage** (`restore_value: true` sur le switch côté ESP).
 
-## Persistance des listes
+---
 
-- **Whitelist** et **liste rouge** sont stockées en **NVS** (ESP32). Elles survivent aux redémarrages et aux coupures de courant.
-- L’UI affiche les listes et permet d’**ajouter** ou **retirer** la « dernière MAC inconnue » de la whitelist via des boutons.
+## 3. Afficher les infos du BLE qui a déclenché l’alerte
 
-## Référence firmware
+Pour afficher **quelle** MAC et **quel fabricant** ont déclenché l’alerte :
 
-- Fichier : `esphome/ble-sniffer.yaml`
-- Composant persistance : `components/ble_persistent_lists/`
+1. Créer les deux périphériques **texte** (ou « note ») : « Dernière alerte BLE – MAC » et « Dernière alerte BLE – Fabricant ».
+2. Dans `secrets.yaml`, ajouter les IDs : `eedomus_periph_alerte_mac`, `eedomus_periph_alerte_vendor`.
+3. Côté firmware : lors de l’envoi de l’alerte (quand une MAC Rouge est vue et système armé), en plus de `periph.value` sur le périphérique « Alerte intrusion BLE » (value=100), envoyer :
+   - `periph.value` sur le périphérique « Dernière alerte BLE – MAC » = la MAC (ex. `AA:BB:CC:DD:EE:FF`) ;
+   - `periph.value` sur le périphérique « Dernière alerte BLE – Fabricant » = le nom fabricant (ou « Non trouvé »).
+
+Les caractères spéciaux dans les URLs doivent être encodés (ex. `:` → `%3A`). Tronquer si la valeur max du périphérique texte est limitée (ex. 50 caractères pour le fabricant).
+
+---
+
+## 4. Références
+
+- **Secrets** : `docs/secrets_reference.md`, `esphome/secrets.yaml.example`
+- **Base projet** : `docs/ble_base.md`
+- **Plan détaillé** : `docs/ui_et_eedomus_plan.md`
+
+Aucune IP, ID ou clé API ne doit figurer dans le dépôt ; tout est dans `secrets.yaml` (hors dépôt).

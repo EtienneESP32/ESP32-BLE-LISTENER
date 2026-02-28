@@ -18,4 +18,6 @@ Thumbs.db
 
 # Logs / captures
 *.log
+pio_log.txt
 serial_capture_*.txt
+compact_out.txt

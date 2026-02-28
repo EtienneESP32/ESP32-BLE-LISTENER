@@ -1,0 +1,96 @@
+/* esphome_compact.css - Full design overhaul for v1 classic HTML */
+body {
+    background-color: #121212 !important;
+    color: #e0e0e0 !important;
+    font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
+    margin: 0 !important;
+    padding: 20px !important;
+    line-height: 1.5 !important;
+}
+
+header,
+h1 {
+    text-align: center;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #333;
+    margin-bottom: 20px;
+    color: #ffffff !important;
+}
+
+article {
+    max-width: 1400px !important;
+    margin: 0 auto !important;
+    display: block !important;
+}
+
+/* Obliterate the LOG */
+#log,
+h2:last-of-type {
+    display: none !important;
+}
+
+/* Main Table Container */
+table#states {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    background-color: #1e1e1e !important;
+    border-radius: 8px !important;
+    overflow: hidden !important;
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5) !important;
+    table-layout: fixed;
+    /* Force fixed table layout to contain long strings */
+}
+
+table#states thead {
+    display: none !important;
+    /* Hide ugly table header */
+}
+
+table#states tr {
+    border-bottom: 1px solid #2d2d2d !important;
+    transition: background-color 0.2s !important;
+}
+
+table#states tr:hover {
+    background-color: #2a2a2a !important;
+}
+
+table#states tr:last-child {
+    border-bottom: none !important;
+}
+
+/* Entity ID column */
+table#states td:first-child {
+    padding: 16px 20px !important;
+    font-weight: 600 !important;
+    color: #9ca3af !important;
+    width: 15% !important;
+    white-space: nowrap !important;
+    font-size: 15px !important;
+}
+
+/* Entity Value column */
+table#states td:nth-child(2) {
+    padding: 16px 20px !important;
+    font-family: 'Consolas', 'Monaco', monospace !important;
+    font-size: 16px !important;
+    color: #e5e7eb !important;
+    line-height: 1.6 !important;
+    word-break: break-all !important;
+    /* Forces very long text to break safely */
+    white-space: pre-wrap !important;
+    width: 85% !important;
+}
+
+/* Action column */
+table#states td:nth-child(3) {
+    display: none !important;
+}
+
+/* Hide the toggle switch for the ARMAMENT switch to preserve pure log view */
+/* We just want to view the detections */
+table#states tr.switch td:nth-child(2) {
+    font-family: 'Segoe UI', sans-serif !important;
+    font-size: 15px !important;
+    color: #60a5fa !important;
+}

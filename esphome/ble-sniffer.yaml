@@ -3,11 +3,13 @@
 # Secrets : copier esphome/secrets.yaml.example en secrets.yaml (dans esphome/)
 
 substitutions:
-  ble_version: "1.1.0"
+  ble_version: "1.4.7"
+  name: "ble-intrusion-sniff"
+  friendly_name: "BLE Intrusion Sniffer"
   eedomus_host: !secret eedomus_host
   eedomus_api_user: !secret eedomus_api_user
   eedomus_api_secret: !secret eedomus_api_secret
-  eedomus_periph_alert: !secret eedomus_periph_alert
+  eedomus_periph_alert: !secret eedomus_periph_alerte
 
 external_components:
   - source:
@@ -16,8 +18,12 @@ external_components:
     components: [ble_persistent_lists]
 
 esphome:
-  name: ble-intrusion-sniff
-  friendly_name: "BLE Intrusion Sniffer ${ble_version}"
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: false
+  project:
+    name: "EtienneESP32.ESP32-BLE-LISTENER"
+    version: ${ble_version}
   on_boot:
     - lambda: |-
         id(last_unknown_mac).assign("");
@@ -43,19 +49,31 @@ logger:
   logs:
     ble: INFO
     script: ERROR
+    http_request: NONE
+    http_request.idf: NONE
 
 api: {}
 ota:
   platform: esphome
   password: !secret ota_password
+  on_begin:
+    - esp32_ble_tracker.stop_scan:
+
+safe_mode:
+  id: safe_mode_cmp
+  disabled: true
 
 web_server:
   port: 80
-  version: 3
+  version: 1
+  include_internal: false
+  css_url: ""
+  css_include: esphome_compact.css
+  js_include: esphome_compact.js
 
-http_request:
-  timeout: 15s
-  useragent: "ESPHome-BLE-Sniffer/1.0"
+# http_request:
+#   timeout: 15s
+#   useragent: "ESPHome-BLE-Sniffer/1.0"
 
 # Listes blanches/rouges persistées en NVS (survit au redémarrage)
 ble_persistent_lists:
@@ -70,8 +88,6 @@ globals:
     type: std::string
   - id: last_alert_time_ms
     type: uint32_t
-  - id: last_10_entries
-    type: std::string
   - id: whitelist_names
     type: std::string
     restore_value: true
@@ -97,32 +113,50 @@ switch:
 esp32_ble_tracker:
   scan_parameters:
     active: true
-    continuous: true
+    interval: 1129ms
+    window: 317ms
   on_ble_advertise:
     - lambda: |-
         std::string mac = x.address_str();
         if (mac.empty()) return;
-        ESP_LOGI("ble", "BLE: %s", mac.c_str());
         id(script_led_flash).execute();
-        id(last_seen_mac).assign(mac);
-        id(text_last_seen).publish_state(mac.c_str());
+        
+        // Si la MAC est en whitelist, on ignore (si cette fonction existe)
         if (id(ble_lists).is_in_whitelist(mac)) return;
-        id(last_unknown_mac).assign(mac);
-        id(text_last_unknown).publish_state(mac.c_str());
-        std::string ent = std::string(id(last_10_entries));
-        std::string mac_line = mac + "|";
-        if (ent.find(mac_line) == 0 || ent.find("\n" + mac_line) != std::string::npos) return;
-        ent = mac + "|\n" + ent;
-        int n = 0;
-        size_t p = 0;
-        while (n < 10 && p < ent.size()) {
-          size_t q = ent.find('\n', p);
-          if (q == std::string::npos) break;
-          n++;
-          p = q + 1;
+        
+        std::string device_name = x.get_name();
+        
+        char c2 = mac.length() >= 2 ? mac[1] : '0';
+        std::string mac_type = (c2 == '2' || c2 == '6' || c2 == 'a' || c2 == 'A' || c2 == 'e' || c2 == 'E') ? "[PRIVÉE/ALÉATOIRE]" : "[OFFICIELLE/FIXE]";
+
+        if (!device_name.empty()) {
+            // Le Local Name a été trouvé grâce à l'Active Scan
+            ESP_LOGI("ble_sniff", "📝 Nom local détecté: %s, MAC: %s, RSSI: %d", device_name.c_str(), mac.c_str(), x.get_rssi());
         }
-        if (p < ent.size()) ent = ent.substr(0, p);
-        id(last_10_entries).assign(ent);
+
+        std::string manuf_str = "";
+        for (auto &md : x.get_manufacturer_datas()) {
+           if (!manuf_str.empty()) manuf_str += ", ";
+           manuf_str += md.uuid.to_string() + ":";
+           for (auto b : md.data) {
+             char buf[4];
+             sprintf(buf, "%02X", b);
+             manuf_str += buf;
+           }
+        }
+        
+        std::string uuids_str = "";
+        for (auto &uuid : x.get_service_uuids()) {
+          if (!uuids_str.empty()) uuids_str += ", ";
+          uuids_str += uuid.to_string();
+        }
+
+        // Anti-doublon simple et affichage
+        // On pousse l'adresse MAC détectée dans la C++ List, accompagnée de son nom s'il existe
+        id(ble_lists).add_recent_mac_no_duplicate(mac, device_name, manuf_str, uuids_str);
+        
+        ESP_LOGI("ble_sniff", "📡 BLE Inconnu détecté | MAC: %s | Type: %s | Nom: %s", mac.c_str(), mac_type.c_str(), device_name.empty() ? "(Inconnu)" : device_name.c_str());
+        
         id(script_lookup_vendor).execute(mac);
         if (!id(arm_alert).state) return;
         uint32_t now = millis();
@@ -144,23 +178,9 @@ script:
     parameters:
       p_mac: std::string
     then:
-      - http_request.get:
-          url: !lambda |-
-            static char url[320];
-            snprintf(url, sizeof(url),
-              "http://%s/api/set?api_user=%s&api_secret=%s&action=periph.value&periph_id=%s&value=100",
-              "${eedomus_host}", "${eedomus_api_user}", "${eedomus_api_secret}", "${eedomus_periph_alert}");
-            return url;
-          on_response:
-            then:
-              - logger.log:
-                  level: INFO
-                  format: "Alerte eedomus envoyée (MAC inconnue)"
-          on_error:
-            then:
-              - logger.log:
-                  level: DEBUG
-                  format: "Alerte eedomus HTTP échouée"
+      - logger.log:
+          level: INFO
+          format: "Alerte Eedomus DESACTIVEE pour test (MAC inconnue)"
 
 # Script : lookup constructeur (OUI) via API web pour la MAC donnée
   - id: script_lookup_vendor
@@ -170,1303 +190,44 @@ script:
     then:
       - text_sensor.template.publish:
           id: text_vendor_web
-          state: "Recherche..."
-      - http_request.get:
-          url: !lambda |-
-            static char url_buf[80];
-            std::string raw = p_mac.size() >= 8 ? p_mac.substr(0, 8) : p_mac;
-            std::string oui_clean;
-            for (size_t i = 0; i < raw.size() && oui_clean.size() < 6; i++)
-              if ((raw[i] >= '0' && raw[i] <= '9') || (raw[i] >= 'A' && raw[i] <= 'F') || (raw[i] >= 'a' && raw[i] <= 'f'))
-                oui_clean += raw[i];
-            if (oui_clean.empty()) oui_clean = "000000";
-            snprintf(url_buf, sizeof(url_buf), "https://api.macvendors.com/%s", oui_clean.c_str());
-            return url_buf;
-          capture_response: true
-          on_response:
-            then:
-              - lambda: |-
-                  std::string vendor = body;
-                  bool is_error = (vendor.find("error") != std::string::npos) ||
-                    (vendor.find("Not Found") != std::string::npos) ||
-                    (vendor.find("\"detail\"") != std::string::npos) ||
-                    vendor.length() > 200;
-                  if (is_error || vendor.empty()) vendor = "Non trouvé";
-                  else {
-                    if (vendor.length() > 50) vendor = vendor.substr(0, 50);
-                    for (size_t i = 0; i < vendor.size(); i++)
-                      if (vendor[i] == '\n' || vendor[i] == '\r') vendor[i] = ' ';
-                  }
-                  id(text_vendor_web).publish_state(vendor.c_str());
-                  std::string e = std::string(id(last_10_entries));
-                  std::string new_e;
-                  size_t pos = 0;
-                  std::string prefix = p_mac + "|";
-                  while (pos < e.size()) {
-                    size_t next = e.find('\n', pos);
-                    if (next == std::string::npos) next = e.size();
-                    std::string line = e.substr(pos, next - pos);
-                    if (line.size() >= prefix.size() && line.substr(0, prefix.size()) == prefix) {
-                      new_e += p_mac + "|" + vendor + "\n";
-                    } else {
-                      new_e += line + "\n";
-                    }
-                    pos = next + 1;
-                  }
-                  id(last_10_entries).assign(new_e);
-          on_error:
-            then:
-              - text_sensor.template.publish:
-                  id: text_vendor_web
-                  state: "Erreur réseau"
-  - id: refresh_whitelist_table
-    mode: single
-    then: []
+          state: "Lookup Désactivé (V1.4.2 Test)"
 
-# Affichage UI : version, dernière MAC vue, inconnus
+sensor:
+  - platform: wifi_signal
+    name: "Signal Wi-Fi"
+    update_interval: 60s
+
 text_sensor:
   - platform: template
     name: "Version"
     id: text_version
-    lambda: "return std::string(\"${ble_version}\");"
+    lambda: 'return std::string("${ble_version}");'
   - platform: template
-    name: "Dernière MAC vue"
-    id: text_last_seen
-  - platform: template
-    name: "Dernière MAC inconnue"
-    id: text_last_unknown
-  - platform: template
-    name: "Info constructeur (web)"
+    name: "Info constructeur"
     id: text_vendor_web
-  - platform: template
-    name: "1"
-    id: text_unknown_1
-    update_interval: 5s
-    lambda: |-
-      std::string e = std::string(id(last_10_entries));
-      size_t pos = 0;
-      for (int i = 0; i < 1 && pos < e.size(); i++) {
-        size_t next = e.find('\n', pos);
-        if (next == std::string::npos) next = e.size();
-        if (i == 0) {
-          std::string line = e.substr(pos, next - pos);
-          size_t pipe = line.find('|');
-          std::string mac_part = pipe != std::string::npos ? line.substr(0, pipe) : line;
-          std::string vendor_part = pipe != std::string::npos ? line.substr(pipe + 1) : "";
-          if (mac_part.empty()) return std::string("");
-          return vendor_part.empty() ? mac_part : (mac_part + " - " + vendor_part);
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-  - platform: template
-    name: "2"
-    id: text_unknown_2
-    update_interval: 5s
-    lambda: |-
-      std::string e = std::string(id(last_10_entries));
-      size_t pos = 0;
-      for (int i = 0; i < 2 && pos < e.size(); i++) {
-        size_t next = e.find('\n', pos);
-        if (next == std::string::npos) next = e.size();
-        if (i == 1) {
-          std::string line = e.substr(pos, next - pos);
-          size_t pipe = line.find('|');
-          std::string mac_part = pipe != std::string::npos ? line.substr(0, pipe) : line;
-          std::string vendor_part = pipe != std::string::npos ? line.substr(pipe + 1) : "";
-          if (mac_part.empty()) return std::string("");
-          return vendor_part.empty() ? mac_part : (mac_part + " - " + vendor_part);
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-  - platform: template
-    name: "3"
-    id: text_unknown_3
-    update_interval: 5s
-    lambda: |-
-      std::string e = std::string(id(last_10_entries));
-      size_t pos = 0;
-      for (int i = 0; i < 3 && pos < e.size(); i++) {
-        size_t next = e.find('\n', pos);
-        if (next == std::string::npos) next = e.size();
-        if (i == 2) {
-          std::string line = e.substr(pos, next - pos);
-          size_t pipe = line.find('|');
-          std::string mac_part = pipe != std::string::npos ? line.substr(0, pipe) : line;
-          std::string vendor_part = pipe != std::string::npos ? line.substr(pipe + 1) : "";
-          if (mac_part.empty()) return std::string("");
-          return vendor_part.empty() ? mac_part : (mac_part + " - " + vendor_part);
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-  - platform: template
-    name: "4"
-    id: text_unknown_4
-    update_interval: 5s
-    lambda: |-
-      std::string e = std::string(id(last_10_entries));
-      size_t pos = 0;
-      for (int i = 0; i < 4 && pos < e.size(); i++) {
-        size_t next = e.find('\n', pos);
-        if (next == std::string::npos) next = e.size();
-        if (i == 3) {
-          std::string line = e.substr(pos, next - pos);
-          size_t pipe = line.find('|');
-          std::string mac_part = pipe != std::string::npos ? line.substr(0, pipe) : line;
-          std::string vendor_part = pipe != std::string::npos ? line.substr(pipe + 1) : "";
-          if (mac_part.empty()) return std::string("");
-          return vendor_part.empty() ? mac_part : (mac_part + " - " + vendor_part);
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-  - platform: template
-    name: "5"
-    id: text_unknown_5
-    update_interval: 5s
-    lambda: |-
-      std::string e = std::string(id(last_10_entries));
-      size_t pos = 0;
-      for (int i = 0; i < 5 && pos < e.size(); i++) {
-        size_t next = e.find('\n', pos);
-        if (next == std::string::npos) next = e.size();
-        if (i == 4) {
-          std::string line = e.substr(pos, next - pos);
-          size_t pipe = line.find('|');
-          std::string mac_part = pipe != std::string::npos ? line.substr(0, pipe) : line;
-          std::string vendor_part = pipe != std::string::npos ? line.substr(pipe + 1) : "";
-          if (mac_part.empty()) return std::string("");
-          return vendor_part.empty() ? mac_part : (mac_part + " - " + vendor_part);
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-  - platform: template
-    name: "6"
-    id: text_unknown_6
-    update_interval: 5s
-    lambda: |-
-      std::string e = std::string(id(last_10_entries));
-      size_t pos = 0;
-      for (int i = 0; i < 6 && pos < e.size(); i++) {
-        size_t next = e.find('\n', pos);
-        if (next == std::string::npos) next = e.size();
-        if (i == 5) {
-          std::string line = e.substr(pos, next - pos);
-          size_t pipe = line.find('|');
-          std::string mac_part = pipe != std::string::npos ? line.substr(0, pipe) : line;
-          std::string vendor_part = pipe != std::string::npos ? line.substr(pipe + 1) : "";
-          if (mac_part.empty()) return std::string("");
-          return vendor_part.empty() ? mac_part : (mac_part + " - " + vendor_part);
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-  - platform: template
-    name: "7"
-    id: text_unknown_7
-    update_interval: 5s
-    lambda: |-
-      std::string e = std::string(id(last_10_entries));
-      size_t pos = 0;
-      for (int i = 0; i < 7 && pos < e.size(); i++) {
-        size_t next = e.find('\n', pos);
-        if (next == std::string::npos) next = e.size();
-        if (i == 6) {
-          std::string line = e.substr(pos, next - pos);
-          size_t pipe = line.find('|');
-          std::string mac_part = pipe != std::string::npos ? line.substr(0, pipe) : line;
-          std::string vendor_part = pipe != std::string::npos ? line.substr(pipe + 1) : "";
-          if (mac_part.empty()) return std::string("");
-          return vendor_part.empty() ? mac_part : (mac_part + " - " + vendor_part);
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-  - platform: template
-    name: "8"
-    id: text_unknown_8
-    update_interval: 5s
-    lambda: |-
-      std::string e = std::string(id(last_10_entries));
-      size_t pos = 0;
-      for (int i = 0; i < 8 && pos < e.size(); i++) {
-        size_t next = e.find('\n', pos);
-        if (next == std::string::npos) next = e.size();
-        if (i == 7) {
-          std::string line = e.substr(pos, next - pos);
-          size_t pipe = line.find('|');
-          std::string mac_part = pipe != std::string::npos ? line.substr(0, pipe) : line;
-          std::string vendor_part = pipe != std::string::npos ? line.substr(pipe + 1) : "";
-          if (mac_part.empty()) return std::string("");
-          return vendor_part.empty() ? mac_part : (mac_part + " - " + vendor_part);
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-  - platform: template
-    name: "9"
-    id: text_unknown_9
-    update_interval: 5s
-    lambda: |-
-      std::string e = std::string(id(last_10_entries));
-      size_t pos = 0;
-      for (int i = 0; i < 9 && pos < e.size(); i++) {
-        size_t next = e.find('\n', pos);
-        if (next == std::string::npos) next = e.size();
-        if (i == 8) {
-          std::string line = e.substr(pos, next - pos);
-          size_t pipe = line.find('|');
-          std::string mac_part = pipe != std::string::npos ? line.substr(0, pipe) : line;
-          std::string vendor_part = pipe != std::string::npos ? line.substr(pipe + 1) : "";
-          if (mac_part.empty()) return std::string("");
-          return vendor_part.empty() ? mac_part : (mac_part + " - " + vendor_part);
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-  - platform: template
-    name: "?10"
-    id: text_unknown_10
-    update_interval: 5s
-    lambda: |-
-      std::string e = std::string(id(last_10_entries));
-      size_t pos = 0;
-      for (int i = 0; i < 10 && pos < e.size(); i++) {
-        size_t next = e.find('\n', pos);
-        if (next == std::string::npos) next = e.size();
-        if (i == 9) {
-          std::string line = e.substr(pos, next - pos);
-          size_t pipe = line.find('|');
-          std::string mac_part = pipe != std::string::npos ? line.substr(0, pipe) : line;
-          std::string vendor_part = pipe != std::string::npos ? line.substr(pipe + 1) : "";
-          if (mac_part.empty()) return std::string("");
-          return vendor_part.empty() ? mac_part : (mac_part + " - " + vendor_part);
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-  - platform: template
-    name: "Liste rouge"
-    id: text_blacklist
-    update_interval: 30s
-    lambda: |-
-      std::string b = id(ble_lists).get_blacklist_str();
-      if (b.empty()) return std::string("(vide)");
-      std::string out;
-      size_t pos = 0;
-      while (pos < b.size()) {
-        size_t next = b.find(',', pos);
-        if (next == std::string::npos) next = b.size();
-        if (!out.empty()) out += "\n";
-        out += b.substr(pos, next - pos);
-        pos = next + 1;
-      }
-      return out;
-  - platform: template
-    name: "01"
-    id: text_wl_mac_1
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      if (w.empty()) return std::string("-");
-      size_t next = w.find(',', 0);
-      if (next == std::string::npos) next = w.size();
-      return w.substr(0, next);
-  - platform: template
-    name: "02"
-    id: text_wl_mac_2
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      size_t pos = 0;
-      for (int i = 0; i < 2; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("-");
-        if (i == 1) return w.substr(pos, next - pos);
-        pos = next + 1;
-      }
-      return std::string("-");
-  - platform: template
-    name: "03"
-    id: text_wl_mac_3
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      size_t pos = 0;
-      for (int i = 0; i < 3; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("-");
-        if (i == 2) return w.substr(pos, next - pos);
-        pos = next + 1;
-      }
-      return std::string("-");
-  - platform: template
-    name: "04"
-    id: text_wl_mac_4
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      size_t pos = 0;
-      for (int i = 0; i < 4; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("-");
-        if (i == 3) return w.substr(pos, next - pos);
-        pos = next + 1;
-      }
-      return std::string("-");
-  - platform: template
-    name: "05"
-    id: text_wl_mac_5
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      size_t pos = 0;
-      for (int i = 0; i < 5; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("-");
-        if (i == 4) return w.substr(pos, next - pos);
-        pos = next + 1;
-      }
-      return std::string("-");
-  - platform: template
-    name: "06"
-    id: text_wl_mac_6
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      size_t pos = 0;
-      for (int i = 0; i < 6; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("-");
-        if (i == 5) return w.substr(pos, next - pos);
-        pos = next + 1;
-      }
-      return std::string("-");
-  - platform: template
-    name: "07"
-    id: text_wl_mac_7
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      size_t pos = 0;
-      for (int i = 0; i < 7; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("-");
-        if (i == 6) return w.substr(pos, next - pos);
-        pos = next + 1;
-      }
-      return std::string("-");
-  - platform: template
-    name: "08"
-    id: text_wl_mac_8
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      size_t pos = 0;
-      for (int i = 0; i < 8; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("-");
-        if (i == 7) return w.substr(pos, next - pos);
-        pos = next + 1;
-      }
-      return std::string("-");
-  - platform: template
-    name: "09"
-    id: text_wl_mac_9
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      size_t pos = 0;
-      for (int i = 0; i < 9; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("-");
-        if (i == 8) return w.substr(pos, next - pos);
-        pos = next + 1;
-      }
-      return std::string("-");
-  - platform: template
-    name: "10"
-    id: text_wl_mac_10
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      size_t pos = 0;
-      for (int i = 0; i < 10; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("-");
-        if (i == 9) return w.substr(pos, next - pos);
-        pos = next + 1;
-      }
-      return std::string("-");
+# --- BEGIN COMPACT UI INCONNUS ---
+  - { platform: template, name: "Détection 01", id: recent_mac_1, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(0); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 02", id: recent_mac_2, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(1); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 03", id: recent_mac_3, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(2); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 04", id: recent_mac_4, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(3); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 05", id: recent_mac_5, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(4); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 06", id: recent_mac_6, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(5); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 07", id: recent_mac_7, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(6); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 08", id: recent_mac_8, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(7); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 09", id: recent_mac_9, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(8); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 10", id: recent_mac_10, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(9); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 11", id: recent_mac_11, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(10); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 12", id: recent_mac_12, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(11); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 13", id: recent_mac_13, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(12); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 14", id: recent_mac_14, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(13); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 15", id: recent_mac_15, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(14); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 16", id: recent_mac_16, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(15); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 17", id: recent_mac_17, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(16); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 18", id: recent_mac_18, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(17); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 19", id: recent_mac_19, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(18); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+  - { platform: template, name: "Détection 20", id: recent_mac_20, update_interval: 10s, lambda: "std::string m = id(ble_lists).get_recent_mac(19); return m.empty() ? std::string(\"\") : (m.find(\"|\") != std::string::npos ? m : m + \" | (Pas de nom)\");" }
+# --- END COMPACT UI INCONNUS ---
 
-# Boutons UI : ajouter / retirer de la whitelist (dernière MAC inconnue)
-button:
-  - platform: template
-    name: "Ajouter dernière inconnue à la whitelist"
-    id: btn_add_whitelist
-    on_press:
-      - lambda: |-
-          std::string mac = std::string(id(last_unknown_mac));
-          if (!mac.empty()) {
-            id(ble_lists).add_to_whitelist(mac);
-            id(refresh_whitelist_table).execute();
-          }
-  - platform: template
-    name: "Retirer dernière inconnue de la whitelist"
-    id: btn_remove_whitelist
-    on_press:
-      - lambda: |-
-          std::string mac = std::string(id(last_unknown_mac));
-          if (!mac.empty()) {
-            id(ble_lists).remove_from_whitelist(mac);
-            id(refresh_whitelist_table).execute();
-          }
-  - platform: template
-    name: "Rechercher infos constructeur (web)"
-    id: btn_lookup_vendor
-    on_press:
-      - lambda: |-
-          std::string mac = std::string(id(last_unknown_mac));
-          if (!mac.empty()) id(script_lookup_vendor).execute(mac)
-  - platform: template
-    name: "→ WL 1"
-    id: btn_wl_1
-    on_press:
-      - lambda: |-
-          std::string e = std::string(id(last_10_entries));
-          size_t pos = 0;
-          for (int i = 0; i < 1 && pos < e.size(); i++) {
-            size_t next = e.find('\n', pos);
-            if (next == std::string::npos) next = e.size();
-            if (i == 0) {
-              std::string line = e.substr(pos, next - pos);
-              size_t pipe = line.find('|');
-              std::string mac = pipe != std::string::npos ? line.substr(0, pipe) : line;
-              if (!mac.empty()) {
-                id(ble_lists).add_to_whitelist(mac);
-                std::string new_e;
-                size_t p = 0;
-                int skip = 0;
-                while (p < e.size()) {
-                  size_t n = e.find('\n', p);
-                  if (n == std::string::npos) n = e.size();
-                  if (skip != 0) new_e += e.substr(p, n - p) + "\n";
-                  skip++;
-                  p = n + 1;
-                }
-                if (!new_e.empty() && new_e.back() == '\n') new_e.pop_back();
-                id(last_10_entries).assign(new_e);
-                id(refresh_whitelist_table).execute();
-              }
-              return;
-            }
-            pos = next + 1;
-          }
-  - platform: template
-    name: "→ WL 2"
-    id: btn_wl_2
-    on_press:
-      - lambda: |-
-          std::string e = std::string(id(last_10_entries));
-          size_t pos = 0;
-          std::string mac;
-          int target = 2;
-          for (int i = 0; i < target && pos < e.size(); i++) {
-            size_t next = e.find('\n', pos);
-            if (next == std::string::npos) next = e.size();
-            if (i == target - 1) {
-              std::string line = e.substr(pos, next - pos);
-              size_t pipe = line.find('|');
-              mac = pipe != std::string::npos ? line.substr(0, pipe) : line;
-              break;
-            }
-            pos = next + 1;
-          }
-          if (!mac.empty()) {
-            id(ble_lists).add_to_whitelist(mac);
-            std::string new_e;
-            size_t p = 0;
-            int skip = 0;
-            while (p < e.size()) {
-              size_t n = e.find('\n', p);
-              if (n == std::string::npos) n = e.size();
-              if (skip != 1) new_e += e.substr(p, n - p) + "\n";
-              skip++;
-              p = n + 1;
-            }
-            if (!new_e.empty() && new_e.back() == '\n') new_e.pop_back();
-            id(last_10_entries).assign(new_e);
-            id(refresh_whitelist_table).execute();
-          }
-  - platform: template
-    name: "→ WL 3"
-    id: btn_wl_3
-    on_press:
-      - lambda: |-
-          std::string e = std::string(id(last_10_entries));
-          size_t pos = 0;
-          std::string mac;
-          for (int i = 0; i < 3 && pos < e.size(); i++) {
-            size_t next = e.find('\n', pos);
-            if (next == std::string::npos) next = e.size();
-            if (i == 2) { std::string line = e.substr(pos, next - pos); size_t pipe = line.find('|'); mac = pipe != std::string::npos ? line.substr(0, pipe) : line; break; }
-            pos = next + 1;
-          }
-          if (!mac.empty()) { id(ble_lists).add_to_whitelist(mac); std::string new_e; size_t p = 0; int sk = 0; while (p < e.size()) { size_t n = e.find('\n', p); if (n == std::string::npos) n = e.size(); if (sk != 2) new_e += e.substr(p, n - p) + "\n"; sk++; p = n + 1; } if (!new_e.empty() && new_e.back() == '\n') new_e.pop_back(); id(last_10_entries).assign(new_e); id(refresh_whitelist_table).execute(); }
-  - platform: template
-    name: "→ WL 4"
-    id: btn_wl_4
-    on_press:
-      - lambda: |-
-          std::string e = std::string(id(last_10_entries));
-          size_t pos = 0;
-          std::string mac;
-          for (int i = 0; i < 4 && pos < e.size(); i++) {
-            size_t next = e.find('\n', pos);
-            if (next == std::string::npos) next = e.size();
-            if (i == 3) { std::string line = e.substr(pos, next - pos); size_t pipe = line.find('|'); mac = pipe != std::string::npos ? line.substr(0, pipe) : line; break; }
-            pos = next + 1;
-          }
-          if (!mac.empty()) { id(ble_lists).add_to_whitelist(mac); std::string new_e; size_t p = 0; int sk = 0; while (p < e.size()) { size_t n = e.find('\n', p); if (n == std::string::npos) n = e.size(); if (sk != 3) new_e += e.substr(p, n - p) + "\n"; sk++; p = n + 1; } if (!new_e.empty() && new_e.back() == '\n') new_e.pop_back(); id(last_10_entries).assign(new_e); id(refresh_whitelist_table).execute(); }
-  - platform: template
-    name: "→ WL 5"
-    id: btn_wl_5
-    on_press:
-      - lambda: |-
-          std::string e = std::string(id(last_10_entries));
-          size_t pos = 0;
-          std::string mac;
-          for (int i = 0; i < 5 && pos < e.size(); i++) {
-            size_t next = e.find('\n', pos);
-            if (next == std::string::npos) next = e.size();
-            if (i == 4) { std::string line = e.substr(pos, next - pos); size_t pipe = line.find('|'); mac = pipe != std::string::npos ? line.substr(0, pipe) : line; break; }
-            pos = next + 1;
-          }
-          if (!mac.empty()) { id(ble_lists).add_to_whitelist(mac); std::string new_e; size_t p = 0; int sk = 0; while (p < e.size()) { size_t n = e.find('\n', p); if (n == std::string::npos) n = e.size(); if (sk != 4) new_e += e.substr(p, n - p) + "\n"; sk++; p = n + 1; } if (!new_e.empty() && new_e.back() == '\n') new_e.pop_back(); id(last_10_entries).assign(new_e); id(refresh_whitelist_table).execute(); }
-  - platform: template
-    name: "→ WL 6"
-    id: btn_wl_6
-    on_press:
-      - lambda: |-
-          std::string e = std::string(id(last_10_entries));
-          size_t pos = 0;
-          std::string mac;
-          for (int i = 0; i < 6 && pos < e.size(); i++) {
-            size_t next = e.find('\n', pos);
-            if (next == std::string::npos) next = e.size();
-            if (i == 5) { std::string line = e.substr(pos, next - pos); size_t pipe = line.find('|'); mac = pipe != std::string::npos ? line.substr(0, pipe) : line; break; }
-            pos = next + 1;
-          }
-          if (!mac.empty()) { id(ble_lists).add_to_whitelist(mac); std::string new_e; size_t p = 0; int sk = 0; while (p < e.size()) { size_t n = e.find('\n', p); if (n == std::string::npos) n = e.size(); if (sk != 5) new_e += e.substr(p, n - p) + "\n"; sk++; p = n + 1; } if (!new_e.empty() && new_e.back() == '\n') new_e.pop_back(); id(last_10_entries).assign(new_e); id(refresh_whitelist_table).execute(); }
-  - platform: template
-    name: "→ WL 7"
-    id: btn_wl_7
-    on_press:
-      - lambda: |-
-          std::string e = std::string(id(last_10_entries));
-          size_t pos = 0;
-          std::string mac;
-          for (int i = 0; i < 7 && pos < e.size(); i++) {
-            size_t next = e.find('\n', pos);
-            if (next == std::string::npos) next = e.size();
-            if (i == 6) { std::string line = e.substr(pos, next - pos); size_t pipe = line.find('|'); mac = pipe != std::string::npos ? line.substr(0, pipe) : line; break; }
-            pos = next + 1;
-          }
-          if (!mac.empty()) { id(ble_lists).add_to_whitelist(mac); std::string new_e; size_t p = 0; int sk = 0; while (p < e.size()) { size_t n = e.find('\n', p); if (n == std::string::npos) n = e.size(); if (sk != 6) new_e += e.substr(p, n - p) + "\n"; sk++; p = n + 1; } if (!new_e.empty() && new_e.back() == '\n') new_e.pop_back(); id(last_10_entries).assign(new_e); id(refresh_whitelist_table).execute(); }
-  - platform: template
-    name: "→ WL 8"
-    id: btn_wl_8
-    on_press:
-      - lambda: |-
-          std::string e = std::string(id(last_10_entries));
-          size_t pos = 0;
-          std::string mac;
-          for (int i = 0; i < 8 && pos < e.size(); i++) {
-            size_t next = e.find('\n', pos);
-            if (next == std::string::npos) next = e.size();
-            if (i == 7) { std::string line = e.substr(pos, next - pos); size_t pipe = line.find('|'); mac = pipe != std::string::npos ? line.substr(0, pipe) : line; break; }
-            pos = next + 1;
-          }
-          if (!mac.empty()) { id(ble_lists).add_to_whitelist(mac); std::string new_e; size_t p = 0; int sk = 0; while (p < e.size()) { size_t n = e.find('\n', p); if (n == std::string::npos) n = e.size(); if (sk != 7) new_e += e.substr(p, n - p) + "\n"; sk++; p = n + 1; } if (!new_e.empty() && new_e.back() == '\n') new_e.pop_back(); id(last_10_entries).assign(new_e); id(refresh_whitelist_table).execute(); }
-  - platform: template
-    name: "→ WL 9"
-    id: btn_wl_9
-    on_press:
-      - lambda: |-
-          std::string e = std::string(id(last_10_entries));
-          size_t pos = 0;
-          std::string mac;
-          for (int i = 0; i < 9 && pos < e.size(); i++) {
-            size_t next = e.find('\n', pos);
-            if (next == std::string::npos) next = e.size();
-            if (i == 8) { std::string line = e.substr(pos, next - pos); size_t pipe = line.find('|'); mac = pipe != std::string::npos ? line.substr(0, pipe) : line; break; }
-            pos = next + 1;
-          }
-          if (!mac.empty()) { id(ble_lists).add_to_whitelist(mac); std::string new_e; size_t p = 0; int sk = 0; while (p < e.size()) { size_t n = e.find('\n', p); if (n == std::string::npos) n = e.size(); if (sk != 8) new_e += e.substr(p, n - p) + "\n"; sk++; p = n + 1; } if (!new_e.empty() && new_e.back() == '\n') new_e.pop_back(); id(last_10_entries).assign(new_e); id(refresh_whitelist_table).execute(); }
-  - platform: template
-    name: "→ WL 10"
-    id: btn_wl_10
-    on_press:
-      - lambda: |-
-          std::string e = std::string(id(last_10_entries));
-          size_t pos = 0;
-          std::string mac;
-          for (int i = 0; i < 10 && pos < e.size(); i++) {
-            size_t next = e.find('\n', pos);
-            if (next == std::string::npos) next = e.size();
-            if (i == 9) { std::string line = e.substr(pos, next - pos); size_t pipe = line.find('|'); mac = pipe != std::string::npos ? line.substr(0, pipe) : line; break; }
-            pos = next + 1;
-          }
-          if (!mac.empty()) { id(ble_lists).add_to_whitelist(mac); std::string new_e; size_t p = 0; int sk = 0; while (p < e.size()) { size_t n = e.find('\n', p); if (n == std::string::npos) n = e.size(); if (sk != 9) new_e += e.substr(p, n - p) + "\n"; sk++; p = n + 1; } if (!new_e.empty() && new_e.back() == '\n') new_e.pop_back(); id(last_10_entries).assign(new_e); id(refresh_whitelist_table).execute(); }
+# UI nettoyee - Les boutons whitelist et lookup sont desormais geres autrement ou supprimes
 
-text:
-  - platform: template
-    name: "01."
-    id: text_wl_nom_1
-    mode: text
-    min_length: 0
-    max_length: 40
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      std::string names = std::string(id(whitelist_names));
-      size_t pos = 0;
-      size_t next = w.find(',', pos);
-      if (next == std::string::npos) next = w.size();
-      if (pos >= w.size()) return std::string("");
-      std::string mac = w.substr(pos, next - pos);
-      size_t npos = 0;
-      while (npos < names.size()) {
-        size_t nline = names.find('\n', npos);
-        if (nline == std::string::npos) nline = names.size();
-        std::string line = names.substr(npos, nline - npos);
-        size_t pipe = line.find('|');
-        if (pipe != std::string::npos && line.substr(0, pipe) == mac)
-          return line.substr(pipe + 1);
-        npos = nline + 1;
-      }
-      return std::string("");
-    set_action:
-      - lambda: |-
-          std::string w = id(ble_lists).get_whitelist_str();
-          size_t pos = 0;
-          size_t next = w.find(',', pos);
-          if (next == std::string::npos) next = w.size();
-          if (pos >= w.size()) return;
-          std::string mac = w.substr(pos, next - pos);
-          std::string names = std::string(id(whitelist_names));
-          std::string new_names;
-          bool found = false;
-          size_t npos = 0;
-          while (npos < names.size()) {
-            size_t nline = names.find('\n', npos);
-            if (nline == std::string::npos) nline = names.size();
-            std::string line = names.substr(npos, nline - npos);
-            size_t pipe = line.find('|');
-            if (pipe != std::string::npos && line.substr(0, pipe) == mac) {
-              new_names += mac + "|" + std::string(x) + "\n";
-              found = true;
-            } else if (!line.empty())
-              new_names += line + "\n";
-            npos = nline + 1;
-          }
-          if (!found) new_names += mac + "|" + std::string(x) + "\n";
-          id(whitelist_names).assign(new_names);
-      - script.execute: refresh_whitelist_table
-  - platform: template
-    name: "02."
-    id: text_wl_nom_2
-    mode: text
-    min_length: 0
-    max_length: 40
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      std::string names = std::string(id(whitelist_names));
-      size_t pos = 0;
-      for (int i = 0; i < 2; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("");
-        if (i == 1) {
-          std::string mac = w.substr(pos, next - pos);
-          size_t npos = 0;
-          while (npos < names.size()) {
-            size_t nline = names.find('\n', npos);
-            if (nline == std::string::npos) nline = names.size();
-            std::string line = names.substr(npos, nline - npos);
-            size_t pipe = line.find('|');
-            if (pipe != std::string::npos && line.substr(0, pipe) == mac)
-              return line.substr(pipe + 1);
-            npos = nline + 1;
-          }
-          return std::string("");
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-    set_action:
-      - lambda: |-
-          std::string w = id(ble_lists).get_whitelist_str();
-          size_t pos = 0;
-          for (int i = 0; i < 2; i++) {
-            size_t next = w.find(',', pos);
-            if (next == std::string::npos) next = w.size();
-            if (pos >= w.size()) return;
-            if (i == 1) {
-              std::string mac = w.substr(pos, next - pos);
-              std::string names = std::string(id(whitelist_names));
-              std::string new_names;
-              bool found = false;
-              size_t npos = 0;
-              while (npos < names.size()) {
-                size_t nline = names.find('\n', npos);
-                if (nline == std::string::npos) nline = names.size();
-                std::string line = names.substr(npos, nline - npos);
-                size_t pipe = line.find('|');
-                if (pipe != std::string::npos && line.substr(0, pipe) == mac) {
-                  new_names += mac + "|" + std::string(x) + "\n";
-                  found = true;
-                } else if (!line.empty()) new_names += line + "\n";
-                npos = nline + 1;
-              }
-              if (!found) new_names += mac + "|" + std::string(x) + "\n";
-              id(whitelist_names).assign(new_names);
-              id(refresh_whitelist_table).execute();
-              return;
-            }
-            pos = next + 1;
-          }
-      - script.execute: refresh_whitelist_table
-  - platform: template
-    name: "03."
-    id: text_wl_nom_3
-    mode: text
-    min_length: 0
-    max_length: 40
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      std::string names = std::string(id(whitelist_names));
-      size_t pos = 0;
-      for (int i = 0; i < 3; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("");
-        if (i == 2) {
-          std::string mac = w.substr(pos, next - pos);
-          size_t npos = 0;
-          while (npos < names.size()) {
-            size_t nline = names.find('\n', npos);
-            if (nline == std::string::npos) nline = names.size();
-            std::string line = names.substr(npos, nline - npos);
-            size_t pipe = line.find('|');
-            if (pipe != std::string::npos && line.substr(0, pipe) == mac)
-              return line.substr(pipe + 1);
-            npos = nline + 1;
-          }
-          return std::string("");
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-    set_action:
-      - lambda: |-
-          std::string w = id(ble_lists).get_whitelist_str();
-          size_t pos = 0;
-          for (int i = 0; i < 3; i++) {
-            size_t next = w.find(',', pos);
-            if (next == std::string::npos) next = w.size();
-            if (pos >= w.size()) return;
-            if (i == 2) {
-              std::string mac = w.substr(pos, next - pos);
-              std::string names = std::string(id(whitelist_names));
-              std::string new_names;
-              bool found = false;
-              size_t npos = 0;
-              while (npos < names.size()) {
-                size_t nline = names.find('\n', npos);
-                if (nline == std::string::npos) nline = names.size();
-                std::string line = names.substr(npos, nline - npos);
-                size_t pipe = line.find('|');
-                if (pipe != std::string::npos && line.substr(0, pipe) == mac) {
-                  new_names += mac + "|" + std::string(x) + "\n";
-                  found = true;
-                } else if (!line.empty()) new_names += line + "\n";
-                npos = nline + 1;
-              }
-              if (!found) new_names += mac + "|" + std::string(x) + "\n";
-              id(whitelist_names).assign(new_names);
-              id(refresh_whitelist_table).execute();
-              return;
-            }
-            pos = next + 1;
-          }
-      - script.execute: refresh_whitelist_table
-  - platform: template
-    name: "04."
-    id: text_wl_nom_4
-    mode: text
-    min_length: 0
-    max_length: 40
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      std::string names = std::string(id(whitelist_names));
-      size_t pos = 0;
-      for (int i = 0; i < 4; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("");
-        if (i == 3) {
-          std::string mac = w.substr(pos, next - pos);
-          size_t npos = 0;
-          while (npos < names.size()) {
-            size_t nline = names.find('\n', npos);
-            if (nline == std::string::npos) nline = names.size();
-            std::string line = names.substr(npos, nline - npos);
-            size_t pipe = line.find('|');
-            if (pipe != std::string::npos && line.substr(0, pipe) == mac)
-              return line.substr(pipe + 1);
-            npos = nline + 1;
-          }
-          return std::string("");
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-    set_action:
-      - lambda: |-
-          std::string w = id(ble_lists).get_whitelist_str();
-          size_t pos = 0;
-          for (int i = 0; i < 4; i++) {
-            size_t next = w.find(',', pos);
-            if (next == std::string::npos) next = w.size();
-            if (pos >= w.size()) return;
-            if (i == 3) {
-              std::string mac = w.substr(pos, next - pos);
-              std::string names = std::string(id(whitelist_names));
-              std::string new_names;
-              bool found = false;
-              size_t npos = 0;
-              while (npos < names.size()) {
-                size_t nline = names.find('\n', npos);
-                if (nline == std::string::npos) nline = names.size();
-                std::string line = names.substr(npos, nline - npos);
-                size_t pipe = line.find('|');
-                if (pipe != std::string::npos && line.substr(0, pipe) == mac) {
-                  new_names += mac + "|" + std::string(x) + "\n";
-                  found = true;
-                } else if (!line.empty()) new_names += line + "\n";
-                npos = nline + 1;
-              }
-              if (!found) new_names += mac + "|" + std::string(x) + "\n";
-              id(whitelist_names).assign(new_names);
-              id(refresh_whitelist_table).execute();
-              return;
-            }
-            pos = next + 1;
-          }
-      - script.execute: refresh_whitelist_table
-  - platform: template
-    name: "05."
-    id: text_wl_nom_5
-    mode: text
-    min_length: 0
-    max_length: 40
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      std::string names = std::string(id(whitelist_names));
-      size_t pos = 0;
-      for (int i = 0; i < 5; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("");
-        if (i == 4) {
-          std::string mac = w.substr(pos, next - pos);
-          size_t npos = 0;
-          while (npos < names.size()) {
-            size_t nline = names.find('\n', npos);
-            if (nline == std::string::npos) nline = names.size();
-            std::string line = names.substr(npos, nline - npos);
-            size_t pipe = line.find('|');
-            if (pipe != std::string::npos && line.substr(0, pipe) == mac)
-              return line.substr(pipe + 1);
-            npos = nline + 1;
-          }
-          return std::string("");
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-    set_action:
-      - lambda: |-
-          std::string w = id(ble_lists).get_whitelist_str();
-          size_t pos = 0;
-          for (int i = 0; i < 5; i++) {
-            size_t next = w.find(',', pos);
-            if (next == std::string::npos) next = w.size();
-            if (pos >= w.size()) return;
-            if (i == 4) {
-              std::string mac = w.substr(pos, next - pos);
-              std::string names = std::string(id(whitelist_names));
-              std::string new_names;
-              bool found = false;
-              size_t npos = 0;
-              while (npos < names.size()) {
-                size_t nline = names.find('\n', npos);
-                if (nline == std::string::npos) nline = names.size();
-                std::string line = names.substr(npos, nline - npos);
-                size_t pipe = line.find('|');
-                if (pipe != std::string::npos && line.substr(0, pipe) == mac) {
-                  new_names += mac + "|" + std::string(x) + "\n";
-                  found = true;
-                } else if (!line.empty()) new_names += line + "\n";
-                npos = nline + 1;
-              }
-              if (!found) new_names += mac + "|" + std::string(x) + "\n";
-              id(whitelist_names).assign(new_names);
-              id(refresh_whitelist_table).execute();
-              return;
-            }
-            pos = next + 1;
-          }
-      - script.execute: refresh_whitelist_table
-  - platform: template
-    name: "06."
-    id: text_wl_nom_6
-    mode: text
-    min_length: 0
-    max_length: 40
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      std::string names = std::string(id(whitelist_names));
-      size_t pos = 0;
-      for (int i = 0; i < 6; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("");
-        if (i == 5) {
-          std::string mac = w.substr(pos, next - pos);
-          size_t npos = 0;
-          while (npos < names.size()) {
-            size_t nline = names.find('\n', npos);
-            if (nline == std::string::npos) nline = names.size();
-            std::string line = names.substr(npos, nline - npos);
-            size_t pipe = line.find('|');
-            if (pipe != std::string::npos && line.substr(0, pipe) == mac)
-              return line.substr(pipe + 1);
-            npos = nline + 1;
-          }
-          return std::string("");
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-    set_action:
-      - lambda: |-
-          std::string w = id(ble_lists).get_whitelist_str();
-          size_t pos = 0;
-          for (int i = 0; i < 6; i++) {
-            size_t next = w.find(',', pos);
-            if (next == std::string::npos) next = w.size();
-            if (pos >= w.size()) return;
-            if (i == 5) {
-              std::string mac = w.substr(pos, next - pos);
-              std::string names = std::string(id(whitelist_names));
-              std::string new_names;
-              bool found = false;
-              size_t npos = 0;
-              while (npos < names.size()) {
-                size_t nline = names.find('\n', npos);
-                if (nline == std::string::npos) nline = names.size();
-                std::string line = names.substr(npos, nline - npos);
-                size_t pipe = line.find('|');
-                if (pipe != std::string::npos && line.substr(0, pipe) == mac) {
-                  new_names += mac + "|" + std::string(x) + "\n";
-                  found = true;
-                } else if (!line.empty()) new_names += line + "\n";
-                npos = nline + 1;
-              }
-              if (!found) new_names += mac + "|" + std::string(x) + "\n";
-              id(whitelist_names).assign(new_names);
-              id(refresh_whitelist_table).execute();
-              return;
-            }
-            pos = next + 1;
-          }
-      - script.execute: refresh_whitelist_table
-  - platform: template
-    name: "07."
-    id: text_wl_nom_7
-    mode: text
-    min_length: 0
-    max_length: 40
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      std::string names = std::string(id(whitelist_names));
-      size_t pos = 0;
-      for (int i = 0; i < 7; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("");
-        if (i == 6) {
-          std::string mac = w.substr(pos, next - pos);
-          size_t npos = 0;
-          while (npos < names.size()) {
-            size_t nline = names.find('\n', npos);
-            if (nline == std::string::npos) nline = names.size();
-            std::string line = names.substr(npos, nline - npos);
-            size_t pipe = line.find('|');
-            if (pipe != std::string::npos && line.substr(0, pipe) == mac)
-              return line.substr(pipe + 1);
-            npos = nline + 1;
-          }
-          return std::string("");
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-    set_action:
-      - lambda: |-
-          std::string w = id(ble_lists).get_whitelist_str();
-          size_t pos = 0;
-          for (int i = 0; i < 7; i++) {
-            size_t next = w.find(',', pos);
-            if (next == std::string::npos) next = w.size();
-            if (pos >= w.size()) return;
-            if (i == 6) {
-              std::string mac = w.substr(pos, next - pos);
-              std::string names = std::string(id(whitelist_names));
-              std::string new_names;
-              bool found = false;
-              size_t npos = 0;
-              while (npos < names.size()) {
-                size_t nline = names.find('\n', npos);
-                if (nline == std::string::npos) nline = names.size();
-                std::string line = names.substr(npos, nline - npos);
-                size_t pipe = line.find('|');
-                if (pipe != std::string::npos && line.substr(0, pipe) == mac) {
-                  new_names += mac + "|" + std::string(x) + "\n";
-                  found = true;
-                } else if (!line.empty()) new_names += line + "\n";
-                npos = nline + 1;
-              }
-              if (!found) new_names += mac + "|" + std::string(x) + "\n";
-              id(whitelist_names).assign(new_names);
-              id(refresh_whitelist_table).execute();
-              return;
-            }
-            pos = next + 1;
-          }
-      - script.execute: refresh_whitelist_table
-  - platform: template
-    name: "08."
-    id: text_wl_nom_8
-    mode: text
-    min_length: 0
-    max_length: 40
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      std::string names = std::string(id(whitelist_names));
-      size_t pos = 0;
-      for (int i = 0; i < 8; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("");
-        if (i == 7) {
-          std::string mac = w.substr(pos, next - pos);
-          size_t npos = 0;
-          while (npos < names.size()) {
-            size_t nline = names.find('\n', npos);
-            if (nline == std::string::npos) nline = names.size();
-            std::string line = names.substr(npos, nline - npos);
-            size_t pipe = line.find('|');
-            if (pipe != std::string::npos && line.substr(0, pipe) == mac)
-              return line.substr(pipe + 1);
-            npos = nline + 1;
-          }
-          return std::string("");
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-    set_action:
-      - lambda: |-
-          std::string w = id(ble_lists).get_whitelist_str();
-          size_t pos = 0;
-          for (int i = 0; i < 8; i++) {
-            size_t next = w.find(',', pos);
-            if (next == std::string::npos) next = w.size();
-            if (pos >= w.size()) return;
-            if (i == 7) {
-              std::string mac = w.substr(pos, next - pos);
-              std::string names = std::string(id(whitelist_names));
-              std::string new_names;
-              bool found = false;
-              size_t npos = 0;
-              while (npos < names.size()) {
-                size_t nline = names.find('\n', npos);
-                if (nline == std::string::npos) nline = names.size();
-                std::string line = names.substr(npos, nline - npos);
-                size_t pipe = line.find('|');
-                if (pipe != std::string::npos && line.substr(0, pipe) == mac) {
-                  new_names += mac + "|" + std::string(x) + "\n";
-                  found = true;
-                } else if (!line.empty()) new_names += line + "\n";
-                npos = nline + 1;
-              }
-              if (!found) new_names += mac + "|" + std::string(x) + "\n";
-              id(whitelist_names).assign(new_names);
-              id(refresh_whitelist_table).execute();
-              return;
-            }
-            pos = next + 1;
-          }
-      - script.execute: refresh_whitelist_table
-  - platform: template
-    name: "09."
-    id: text_wl_nom_9
-    mode: text
-    min_length: 0
-    max_length: 40
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      std::string names = std::string(id(whitelist_names));
-      size_t pos = 0;
-      for (int i = 0; i < 9; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("");
-        if (i == 8) {
-          std::string mac = w.substr(pos, next - pos);
-          size_t npos = 0;
-          while (npos < names.size()) {
-            size_t nline = names.find('\n', npos);
-            if (nline == std::string::npos) nline = names.size();
-            std::string line = names.substr(npos, nline - npos);
-            size_t pipe = line.find('|');
-            if (pipe != std::string::npos && line.substr(0, pipe) == mac)
-              return line.substr(pipe + 1);
-            npos = nline + 1;
-          }
-          return std::string("");
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-    set_action:
-      - lambda: |-
-          std::string w = id(ble_lists).get_whitelist_str();
-          size_t pos = 0;
-          for (int i = 0; i < 9; i++) {
-            size_t next = w.find(',', pos);
-            if (next == std::string::npos) next = w.size();
-            if (pos >= w.size()) return;
-            if (i == 8) {
-              std::string mac = w.substr(pos, next - pos);
-              std::string names = std::string(id(whitelist_names));
-              std::string new_names;
-              bool found = false;
-              size_t npos = 0;
-              while (npos < names.size()) {
-                size_t nline = names.find('\n', npos);
-                if (nline == std::string::npos) nline = names.size();
-                std::string line = names.substr(npos, nline - npos);
-                size_t pipe = line.find('|');
-                if (pipe != std::string::npos && line.substr(0, pipe) == mac) {
-                  new_names += mac + "|" + std::string(x) + "\n";
-                  found = true;
-                } else if (!line.empty()) new_names += line + "\n";
-                npos = nline + 1;
-              }
-              if (!found) new_names += mac + "|" + std::string(x) + "\n";
-              id(whitelist_names).assign(new_names);
-              id(refresh_whitelist_table).execute();
-              return;
-            }
-            pos = next + 1;
-          }
-      - script.execute: refresh_whitelist_table
-  - platform: template
-    name: "10."
-    id: text_wl_nom_10
-    mode: text
-    min_length: 0
-    max_length: 40
-    update_interval: 30s
-    lambda: |-
-      std::string w = id(ble_lists).get_whitelist_str();
-      std::string names = std::string(id(whitelist_names));
-      size_t pos = 0;
-      for (int i = 0; i < 10; i++) {
-        size_t next = w.find(',', pos);
-        if (next == std::string::npos) next = w.size();
-        if (pos >= w.size()) return std::string("");
-        if (i == 9) {
-          std::string mac = w.substr(pos, next - pos);
-          size_t npos = 0;
-          while (npos < names.size()) {
-            size_t nline = names.find('\n', npos);
-            if (nline == std::string::npos) nline = names.size();
-            std::string line = names.substr(npos, nline - npos);
-            size_t pipe = line.find('|');
-            if (pipe != std::string::npos && line.substr(0, pipe) == mac)
-              return line.substr(pipe + 1);
-            npos = nline + 1;
-          }
-          return std::string("");
-        }
-        pos = next + 1;
-      }
-      return std::string("");
-    set_action:
-      - lambda: |-
-          std::string w = id(ble_lists).get_whitelist_str();
-          size_t pos = 0;
-          for (int i = 0; i < 10; i++) {
-            size_t next = w.find(',', pos);
-            if (next == std::string::npos) next = w.size();
-            if (pos >= w.size()) return;
-            if (i == 9) {
-              std::string mac = w.substr(pos, next - pos);
-              std::string names = std::string(id(whitelist_names));
-              std::string new_names;
-              bool found = false;
-              size_t npos = 0;
-              while (npos < names.size()) {
-                size_t nline = names.find('\n', npos);
-                if (nline == std::string::npos) nline = names.size();
-                std::string line = names.substr(npos, nline - npos);
-                size_t pipe = line.find('|');
-                if (pipe != std::string::npos && line.substr(0, pipe) == mac) {
-                  new_names += mac + "|" + std::string(x) + "\n";
-                  found = true;
-                } else if (!line.empty()) new_names += line + "\n";
-                npos = nline + 1;
-              }
-              if (!found) new_names += mac + "|" + std::string(x) + "\n";
-              id(whitelist_names).assign(new_names);
-              id(refresh_whitelist_table).execute();
-              return;
-            }
-            pos = next + 1;
-          }
-      - script.execute: refresh_whitelist_table
+
