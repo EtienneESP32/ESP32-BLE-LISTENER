@@ -1,9 +1,7 @@
 # ESP32 BLE Smart Radar — v1.3.5
 
-Détecteur d'intrusion / présence BLE sur ESP32 avec interface Web embarquée (AsyncWebServer + LittleFS).
-
-> **Firmware actif** : `ESP32_Smart_Radar/` (PlatformIO / C++ / NimBLE)  
-> L'implémentation ESPHome (`esphome/`) est conservée pour référence mais n'est plus utilisée.
+Description: Détecteur d'intrusion / présence BLE sur ESP32 avec interface Web embarquée (AsyncWebServer + LittleFS).
+Une version performante en C++ utilisant NimBLE pour un scan optimal et une interface utilisateur premium.
 
 ---
 

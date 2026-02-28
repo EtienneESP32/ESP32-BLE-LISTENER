@@ -1,4 +1,5 @@
 # ESPHome
+esphome/
 .esphome/
 *.yaml.bak
 
